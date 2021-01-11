@@ -1,0 +1,301 @@
+---
+title: "GIS Assessment"
+author: "Zhenning Hu"
+date: "2021/1/10"
+output:
+  html_document:
+    number_sections: false
+    toc: true
+    fig_width: 8
+    fig_height: 6
+    theme: cosmo
+    highlight: tango
+    code_folding: show
+---
+# **Load Packages**
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(leaflet)
+library(rgdal)
+library(raster)
+library(deldir)
+library(mgcv)
+library(rgeos)
+library(mapproj)
+library(pacman) #p_load(mapproj)
+library(sf)
+library(spatstat)
+library(here)
+library(sp)
+library(rgeos)
+library(maptools)
+library(GISTools)
+library(tmap)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
+library(tidyverse)
+library(stringr)
+library(spdep)
+
+```  
+
+# **Data Loading**
+## Set working directory
+```{r}
+getwd()
+setwd("C:/Users/Arios/Documents/GIS/input")
+``` 
+## Starbucks
+```{r}
+starbucks <- read.csv("./input/Starbucks_london.csv", header = TRUE, sep = ",")
+``` 
+
+## Shapefiles with london borough
+```{r}
+ldn<- st_read(here::here("input",
+                      "london.shp"))%>%
+  st_set_crs(., 27700) %>% st_transform(.,27700)
+```
+
+## UK pubs
+```{r}
+
+pub <- read.csv("./input/open_pubs.csv", header = TRUE, sep = ",")
+
+```
+# **Data Cleaning**
+By using the names of 33 local authorities in London, I used R Language to filter out all pubs located in London from the pub data. After the number of pubs in each borough is counted, they are added to London borough boundaries after cleaning.
+```{r}
+# Filter by local authority
+AuthoritiesLondon = c("Barking and Dagenham","Barnet","Bexley","Brent","Bromley",
+                      "Camden","City of London","Croydon","Ealing","Enfield","Greenwich",
+                      "Hackney","Hammersmith and Fulham","Haringey","Harrow","Havering",
+                      "Hillingdon","Hounslow","Islington","Kensington and Chelsea","Kingston upon Thames",
+                      "Lambeth","Lewisham","Merton","Newham","Redbridge",
+                      "Richmond upon Thames","Southwark","Sutton","Tower Hamlets","Waltham Forest",
+                      "Wandsworth","Westminster")
+pub %>% filter(local_authority %in% AuthoritiesLondon) -> publ
+publ %>% group_by(local_authority) %>% summarize(pub = length(name)) -> publondon
+```
+
+Rename Column and joined the he summarized data into the London borough
+```{r}
+names(starbucks)[names(starbucks) == 'local_authority'] <- 'NAME'
+names(ldn)[names(ldn) == 'name'] <- 'borough'
+names(publondon)[names(publondon) == 'local_authority'] <- 'NAME'
+
+ldn <- ldn %>%
+  left_join(.,
+            publondon,
+            by = "NAME")%>%
+  left_join(.,
+            starbucks,
+            by = "NAME")
+
+``` 
+# **Data Visualization**
+### Starbucks in boroughs of London
+Visualizing the density of Starbucks in boroughs of London
+```{r}
+tm1 <- tm_shape(ldn) +
+  tm_polygons("starbucks",
+              palette="Reds",
+              midpoint=NA,
+              title="Starbucks")+
+  tm_layout(frame=FALSE,
+            legend.position = c("right","bottom"), 
+            legend.text.size=0.6, 
+            legend.title.size = 1)+
+  tm_scale_bar(position=c(0,0), text.size=0.4)+
+  tm_compass(type = "8star",size=3,position=c(0,0.15))+
+  tm_credits("(c) Greater London Authority",position=c(0,0),size = 0.5)
+tm1
+```
+
+### Pubs in boroughs of London
+After that visualizing the density of pubs in boroughs of London
+```{r}
+tm2 <- tm_shape(ldn) +
+  tm_polygons("pub",
+              style="jenks",
+              palette=brewer.pal(5, "Reds"),
+              midpoint=NA,
+              title="Pub")+
+  tm_layout(frame=FALSE,
+            legend.position= c("right","bottom"),
+            legend.text.size=0.6,
+            legend.title.size = 1)+
+  tm_scale_bar(position=c(0,0), text.size=0.4)+
+  tm_compass(type = "8star",size=3,position=c(0,0.15))+
+  tm_credits("(c) Greater London Authority",position=c(0,0),size = 0.5)
+tm2
+
+``` 
+
+
+# **Spatial Auto-correlation Analysis**
+First calculate the centroids of all Wards in London
+```{r}
+coordsW <- ldn %>%
+  st_centroid()%>%
+  st_geometry()
+plot(coordsW,axes=TRUE)
+```
+
+And then generate a spatial weight matrix of nearest k-nearest neighbours (k=4) 
+```{r}
+knn_wards <-coordsW %>%
+  knearneigh(., k=4) 
+ldn_knn <- knn_wards %>%
+  knn2nb() %>%
+  nb2listw(., style="C")
+``` 
+
+## Global Moran's I Test
+### For Starbucks’ density
+```{r}
+I_global_starbucks <- ldn %>%
+  pull(starbucks) %>%
+  as.vector()%>%
+  moran.test(., ldn_knn)
+I_global_starbucks
+``` 
+The Moran’s I statistic = 0.45 (1 = clustered, 0 = no pattern, -1 = dispersed) which the distribution of Starbucks has a significant positive spatial correlation
+
+### For pubs’ density
+```{r}
+I_global_pub <- ldn %>%
+  pull(pub) %>%
+  as.vector()%>%
+  moran.test(., ldn_knn)
+I_global_pub
+
+``` 
+The Moran’s I statistic = 0.23 (1 = clustered, 0 = no pattern, -1 = dispersed) which indicates that the distribution of pub in the urban area of London has a relatively weak spatial positive correlation
+
+## Global Geary's C Test
+### For Starbucks’ density
+```{r}
+C_global_starbucks <-ldn %>%
+  pull(starbucks) %>%
+  as.vector()%>%
+  geary.test(., ldn_knn)
+C_global_starbucks
+```
+The Geary’s C statistic = 0.50 (Geary’s C falls between 0 and 2; 1 means no spatial autocorrelation, <1 - positive spatial autocorrelation or similar values clustering, >1 - negative spatial autocorreation or dissimilar values clustering) which shows that similar values are clustering
+
+### For pubs’ density
+```{r}
+C_global_pub <-ldn %>%
+  pull(pub) %>%
+  as.vector()%>%
+  geary.test(., ldn_knn)
+C_global_pub
+
+``` 
+The Geary’s C statistic = 0.80 (Geary’s C falls between 0 and 2; 1 means no spatial autocorrelation, <1 - positive spatial autocorrelation or similar values clustering, >1 - negative spatial autocorreation or dissimilar values clustering) which shows that similar values are clustering as well
+
+## Global Gentis' G Test
+### For Starbucks’ density
+```{r}
+G_global_starbucks <-
+  ldn %>%
+  pull(starbucks) %>%
+  as.vector() %>%
+  globalG.test(., ldn_knn)
+G_global_starbucks
+```
+The General G statistic = G > expected(If G > Expected = High values clustering; if G < expected = low values clustering), so high values are tending to cluster
+
+### For pubs’ density
+```{r}
+G_global_pub <-
+  ldn %>%
+  pull(pub) %>%
+  as.vector()%>%
+  globalG.test(., ldn_knn)
+G_global_pub
+
+``` 
+The General G statistic = G > expected, so high values are tending to cluster as well
+
+## Local Getis' G z-score
+We can now also calculate local versions of the Getis' G statistic to see where we have hot-spots
+```{r}
+G_local_starbucks <- ldn %>%
+  pull(starbucks) %>%
+  as.vector()%>%
+  localG(., ldn_knn)
+
+G_local_pub <- ldn %>%
+  pull(pub) %>%
+  as.vector()%>%
+  localG(., ldn_knn)
+#Covert into a dataframe and append into borough data frame
+G_local_pub_df <- data.frame(matrix(unlist(G_local_pub), nrow=33, byrow=T))
+ldn_pub <- ldn %>%
+  mutate(z_score = as.numeric(G_local_pub_df$matrix.unlist.G_local_pub...nrow...33..byrow...T.))
+
+G_local_starbucks_df <- data.frame(matrix(unlist(G_local_starbucks), nrow=33, byrow=T))
+ldn_starbucks <- ldn %>%
+  mutate(z_score = as.numeric(G_local_starbucks_df$matrix.unlist.G_local_starbucks...nrow...33..byrow...T.))
+```
+
+We’ll set the breaks manually based on the rule that data points >2.58 or <-2.58 standard deviations away from the mean are significant at the 99% level (<1% chance that autocorrelation not present); >1.96 - <2.58 or <-1.96 to >-2.58 standard deviations are significant at the 95% level (<5% change that autocorrelation not present). >1.65 = 90% etc.
+```{r}
+# Set the breaks and color bar manually
+breaks1<-c(-1000.00,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000.00)
+```
+
+Now create a new diverging colour brewer palette and reverse the order using rev() (reverse) so lower values correspond to blue, higher values correspond to red
+```{r}
+GIColours<- rev(brewer.pal(8, "RdBu"))
+tmap_mode("plot")
+```
+
+### Starbucks’ Local Getis-Ord's G z-score map
+Visualizing Starbucks’ Local Getis-Ord's G z-score
+```{r}
+GI_starbucks<-tm_shape(ldn_starbucks) +
+  tm_polygons("z_score",
+              style="fixed",
+              breaks=breaks1,
+              palette=GIColours,
+              midpoint=NA,
+              title="Gi* Starbucks")+
+  tm_layout(frame=FALSE,
+            legend.position = c("right","bottom"),
+            legend.text.size=0.6,
+            legend.title.size = 1)+
+  tm_scale_bar(position=c(0,0), text.size=0.4)+
+  tm_compass(type = "8star",size=3,position=c(0,0.15))+
+  tm_credits("(c) Greater London Authority",position=c(0,0),size = 0.5)
+GI_starbucks
+```
+
+
+
+### Pub’s Local Getis-Ord's G z-score map
+Visualizing Pub’s Local Getis-Ord's G z-score 
+```{r}
+GI_pub<-tm_shape(ldn_pub) +
+  tm_polygons("z_score",
+              style="fixed",
+              breaks=breaks1,
+              palette=GIColours,
+              midpoint=NA,
+              title="Gi* Pub")+
+  tm_layout(frame=FALSE,
+            legend.position = c("right","bottom"),
+            legend.text.size=0.6,
+            legend.title.size = 1)+
+  tm_scale_bar(position=c(0,0), text.size=0.4)+
+  tm_compass(type = "8star",size=3,position=c(0,0.15))+
+  tm_credits("(c) Greater London Authority",position=c(0,0),size = 0.5)
+GI_pub
+
+``` 
+
